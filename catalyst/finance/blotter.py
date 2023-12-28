@@ -34,7 +34,9 @@ from catalyst.finance.commission import (
 from catalyst.finance.cancel_policy import NeverCancel
 from catalyst.utils.input_validation import expect_types
 
-log = Logger('Blotter')
+from catalyst.constants import LOG_LEVEL
+
+log = Logger('Blotter', level=LOG_LEVEL)
 warning_logger = Logger('AlgoWarning')
 
 
@@ -101,9 +103,9 @@ class Blotter(object):
         asset : catalyst.assets.Asset
             The asset that this order is for.
         amount : int
-            The amount of shares to order. If ``amount`` is positive, this is
-            the number of shares to buy or cover. If ``amount`` is negative,
-            this is the number of shares to sell or short.
+            The amount of assets to order. If ``amount`` is positive, this is
+            the number of assets to buy or cover. If ``amount`` is negative,
+            this is the number of assets to sell.
         style : catalyst.finance.execution.ExecutionStyle
             The execution style for the order.
         order_id : str, optional
@@ -379,6 +381,9 @@ class Blotter(object):
                     order.commission += additional_commission
 
                     order.dt = txn.dt
+
+                    # added for stats
+                    txn.commission = additional_commission
 
                     transactions.append(txn)
 

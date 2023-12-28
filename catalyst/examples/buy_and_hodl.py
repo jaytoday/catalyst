@@ -14,29 +14,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pandas as pd
+import matplotlib.pyplot as plt
 
-from catalyst.api import (
-    order_target_value,
-    symbol,
-    record,
-    cancel_order,
-    get_open_orders,
-)
+from catalyst import run_algorithm
+from catalyst.api import (order_target_value, symbol, record,
+                          cancel_order, get_open_orders, )
+
 
 def initialize(context):
-    context.ASSET_NAME = 'USDT_BTC'
+    context.ASSET_NAME = 'btc_usdt'
     context.TARGET_HODL_RATIO = 0.8
     context.RESERVE_RATIO = 1.0 - context.TARGET_HODL_RATIO
-
-    # For all trading pairs in the poloniex bundle, the default denomination
-    # currently supported by Catalyst is 1/1000th of a full coin. Use this
-    # constant to scale the price of up to that of a full coin if desired.
-    context.TICK_SIZE = 1000.0
 
     context.is_buying = True
     context.asset = symbol(context.ASSET_NAME)
 
     context.i = 0
+
 
 def handle_data(context, data):
     context.i += 1
@@ -49,55 +44,56 @@ def handle_data(context, data):
     orders = get_open_orders(context.asset) or []
     for order in orders:
         cancel_order(order)
-    
+
     # Stop buying after passing the reserve threshold
     cash = context.portfolio.cash
     if cash <= reserve_value:
         context.is_buying = False
 
     # Retrieve current asset price from pricing data
-    price = data[context.asset].price
+    price = data.current(context.asset, 'price')
 
     # Check if still buying and could (approximately) afford another purchase
     if context.is_buying and cash > price:
+        print('buying')
         # Place order to make position in asset equal to target_hodl_value
         order_target_value(
             context.asset,
             target_hodl_value,
-            limit_price=price*1.1,
-            stop_price=price*0.9,
+            limit_price=price * 1.1,
         )
 
     record(
         price=price,
-        volume=data[context.asset].volume,
+        volume=data.current(context.asset, 'volume'),
         cash=cash,
         starting_cash=context.portfolio.starting_cash,
         leverage=context.account.leverage,
     )
 
+
 def analyze(context=None, results=None):
-    import matplotlib.pyplot as plt
 
     # Plot the portfolio and asset data.
     ax1 = plt.subplot(611)
     results[['portfolio_value']].plot(ax=ax1)
-    ax1.set_ylabel('Portfolio Value (USD)')
+    ax1.set_ylabel('Portfolio\nValue\n(USD)')
 
     ax2 = plt.subplot(612, sharex=ax1)
-    ax2.set_ylabel('{asset} (USD)'.format(asset=context.ASSET_NAME))
-    (context.TICK_SIZE * results[['price']]).plot(ax=ax2)
+    ax2.set_ylabel('{asset}\n(USD)'.format(asset=context.ASSET_NAME))
+    results[['price']].plot(ax=ax2)
 
     trans = results.ix[[t != [] for t in results.transactions]]
     buys = trans.ix[
         [t[0]['amount'] > 0 for t in trans.transactions]
     ]
-    ax2.plot(
-        buys.index,
-        context.TICK_SIZE * results.price[buys.index],
-        '^',
-        markersize=10,
-        color='g',
+    ax2.scatter(
+        buys.index.to_pydatetime(),
+        results.price[buys.index],
+        marker='^',
+        s=100,
+        c='g',
+        label=''
     )
 
     ax3 = plt.subplot(613, sharex=ax1)
@@ -124,14 +120,29 @@ def analyze(context=None, results=None):
         'algorithm',
         'benchmark',
     ]].plot(ax=ax5)
-    ax5.set_ylabel('Percent Change')
+    ax5.set_ylabel('Percent\nChange')
 
     ax6 = plt.subplot(616, sharex=ax1)
     results[['volume']].plot(ax=ax6)
-    ax6.set_ylabel('Volume (mCoins/5min)')
+    ax6.set_ylabel('Volume')
 
     plt.legend(loc=3)
 
     # Show the plot.
     plt.gcf().set_size_inches(18, 8)
     plt.show()
+
+
+if __name__ == '__main__':
+    run_algorithm(
+        capital_base=10000,
+        data_frequency='daily',
+        initialize=initialize,
+        handle_data=handle_data,
+        analyze=analyze,
+        exchange_name='poloniex',
+        algo_namespace='buy_and_hodl',
+        quote_currency='usdt',
+        start=pd.to_datetime('2015-03-01', utc=True),
+        end=pd.to_datetime('2017-10-31', utc=True),
+    )

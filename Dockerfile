@@ -1,27 +1,27 @@
 #
 # Dockerfile for an image with the currently checked out version of catalyst installed. To build:
 #
-#    docker build -t quantopian/catalyst .
+#    docker build -t enigmampc/catalyst .
 #
 # To run the container:
 #
-#    docker run -v /path/to/your/notebooks:/projects -v ~/.catalyst:/root/.catalyst -p 8888:8888/tcp --name catalyst -it quantopian/catalyst
+#    docker run -v /path/to/your/notebooks:/projects -v ~/.catalyst:/root/.catalyst -p 8888:8888/tcp --name catalyst -it enigmampc/catalyst
 #
 # To access Jupyter when running docker locally (you may need to add NAT rules):
 #
-#    https://127.0.0.1
+#    https://127.0.0.1:8888      <- Please note HTTPS, not HTTP
 #
-# default password is jupyter.  to provide another, see:
+# Default password is 'jupyter'. To provide another, see:
 #    http://jupyter-notebook.readthedocs.org/en/latest/public_server.html#preparing-a-hashed-password
 #
-# once generated, you can pass the new value via `docker run --env` the first time
+# Once generated, you can pass the new value via `docker run --env` the first time
 # you start the container.
 #
-# You can also run an algo using the docker exec command.  For example:
+# You can also run an algo using the docker exec command. For example:
 #
 #    docker exec -it catalyst catalyst run -f /projects/my_algo.py --start 2015-1-1 --end 2016-1-1 /projects/result.pickle
 #
-FROM python:3.5
+FROM python:3.6
 
 #
 # set up environment
@@ -54,9 +54,9 @@ RUN mkdir ${PROJECT_DIR} \
 
 WORKDIR /ta-lib
 
-RUN pip install 'numpy>=1.11.1,<2.0.0' \
-  && pip install 'scipy>=0.17.1,<1.0.0' \
-  && pip install 'pandas>=0.18.1,<1.0.0' \
+RUN pip install 'numpy==1.14.0' \
+  && pip install 'scipy==1.0.0' \
+  && pip install 'pandas==0.19.2' \
   && ./configure --prefix=/usr \
   && make \
   && make install \

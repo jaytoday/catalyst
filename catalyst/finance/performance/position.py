@@ -40,7 +40,9 @@ import logbook
 from catalyst.assets import Future, Asset
 from catalyst.utils.input_validation import expect_types
 
-log = logbook.Logger('Performance')
+from catalyst.constants import LOG_LEVEL
+
+log = logbook.Logger('Performance', level=LOG_LEVEL)
 
 
 class Position(object):
@@ -147,6 +149,15 @@ class Position(object):
             if self.last_sale_date is None or txn.dt > self.last_sale_date:
                 self.last_sale_price = txn.price
                 self.last_sale_date = txn.dt
+
+        # on live mode, if the fee currency exists, reduce the commission
+        # from the position if necessary.
+        # Notice! the fee_currency is compared to the base_currency- once it
+        # is allowed to have more than one quote currency, the comparison is
+        # needed to be changed
+        if txn.commission is not None and \
+                txn.fee_currency == self.asset.base_currency:
+            total_shares -= txn.commission
 
         self.amount = total_shares
 

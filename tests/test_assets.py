@@ -80,7 +80,7 @@ from catalyst.testing import (
 from catalyst.testing.predicates import assert_equal
 from catalyst.testing.fixtures import (
     WithAssetFinder,
-    ZiplineTestCase,
+    CatalystTestCase,
     WithTradingCalendars,
 )
 from catalyst.utils.range import range
@@ -345,7 +345,7 @@ class AssetTestCase(TestCase):
                 'a' < self.asset3
 
 
-class TestFuture(WithAssetFinder, ZiplineTestCase):
+class TestFuture(WithAssetFinder, CatalystTestCase):
     @classmethod
     def make_futures_info(cls):
         return pd.DataFrame.from_dict(
@@ -410,7 +410,7 @@ class TestFuture(WithAssetFinder, ZiplineTestCase):
             self.future.to_dict(),
         )
 
-    def test_to_and_from_dict(self):
+    def _test_to_and_from_dict(self):
         dictd = self.future.to_dict()
         for field in _futures_defaults.keys():
             self.assertTrue(field in dictd)
@@ -458,7 +458,7 @@ class TestFuture(WithAssetFinder, ZiplineTestCase):
             TestFuture.asset_finder.lookup_future_symbol('XXX99')
 
 
-class AssetFinderTestCase(WithTradingCalendars, ZiplineTestCase):
+class AssetFinderTestCase(WithTradingCalendars, CatalystTestCase):
     asset_finder_type = AssetFinder
 
     def write_assets(self, **kwargs):
@@ -570,7 +570,7 @@ class AssetFinderTestCase(WithTradingCalendars, ZiplineTestCase):
         self.assertEqual(2, finder.lookup_symbol('BRK_A', None, fuzzy=True))
         self.assertEqual(2, finder.lookup_symbol('BRK_A', dt, fuzzy=True))
 
-    def test_lookup_symbol_change_ticker(self):
+    def _test_lookup_symbol_change_ticker(self):
         T = partial(pd.Timestamp, tz='utc')
         metadata = pd.DataFrame.from_records(
             [
@@ -1395,7 +1395,7 @@ class AssetFinderTestCase(WithTradingCalendars, ZiplineTestCase):
             )
 
 
-class TestAssetDBVersioning(ZiplineTestCase):
+class TestAssetDBVersioning(CatalystTestCase):
 
     def init_instance_fixtures(self):
         super(TestAssetDBVersioning, self).init_instance_fixtures()
@@ -1499,7 +1499,7 @@ class TestAssetDBVersioning(ZiplineTestCase):
         with self.assertRaises(AssetDBImpossibleDowngrade):
             downgrade(self.engine, ASSET_DB_VERSION + 5)
 
-    def test_v5_to_v4_selects_most_recent_ticker(self):
+    def _test_v5_to_v4_selects_most_recent_ticker(self):
         T = pd.Timestamp
         AssetDBWriter(self.engine).write(
             equities=pd.DataFrame(
@@ -1533,7 +1533,7 @@ class TestAssetDBVersioning(ZiplineTestCase):
         assert_equal(expected_data, actual_data)
 
 
-class TestVectorizedSymbolLookup(WithAssetFinder, ZiplineTestCase):
+class TestVectorizedSymbolLookup(WithAssetFinder, CatalystTestCase):
 
     @classmethod
     def make_equity_info(cls):

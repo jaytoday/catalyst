@@ -1,16 +1,22 @@
 import os
 import re
-from runpy import run_path
 import sys
 import warnings
-from time import sleep
 from datetime import timedelta
-
-import pandas as pd
+from runpy import run_path
+from time import sleep
 
 import click
+import pandas as pd
+from six import string_types
 
-from catalyst.exchange.bittrex.bittrex import Bittrex
+import catalyst
+from catalyst.data.bundles import load
+from catalyst.data.data_portal import DataPortal
+from catalyst.exchange.exchange_pricing_loader import ExchangePricingLoader, \
+    TradingPairPricing
+from catalyst.exchange.utils.factory import get_exchange
+from logbook import Logger
 
 try:
     from pygments import highlight
@@ -18,39 +24,30 @@ try:
     from pygments.formatters import TerminalFormatter
 
     PYGMENTS = True
-except:
+except ImportError:
     PYGMENTS = False
 from toolz import valfilter, concatv
 from functools import partial
 
-from catalyst.algorithm import TradingAlgorithm
-from catalyst.data.bundles.core import load
-from catalyst.data.data_portal import DataPortal
-from catalyst.data.loader import load_crypto_market_data
 from catalyst.finance.trading import TradingEnvironment
-from catalyst.pipeline.data import USEquityPricing, CryptoPricing
-from catalyst.pipeline.loaders import (
-    USEquityPricingLoader,
-    CryptoPricingLoader,
-)
 from catalyst.utils.calendars import get_calendar
 from catalyst.utils.factory import create_simulation_parameters
+from catalyst.data.loader import load_crypto_market_data
 import catalyst.utils.paths as pth
+from catalyst.utils.remote import remote_backtest
 
-from catalyst.exchange.algorithm_exchange import ExchangeTradingAlgorithm
-from catalyst.exchange.data_portal_exchange import DataPortalExchange
-from catalyst.exchange.bitfinex.bitfinex import Bitfinex
-from catalyst.exchange.asset_finder_exchange import AssetFinderExchange
-from catalyst.exchange.exchange_portfolio import ExchangePortfolio
-from catalyst.exchange.exchange_errors import (
-    ExchangeRequestError,
-    ExchangeRequestErrorTooManyAttempts,
-    BaseCurrencyNotFoundError)
-from catalyst.exchange.exchange_utils import get_exchange_auth, \
-    get_algo_object
-from logbook import Logger
+from catalyst.exchange.exchange_algorithm import (
+    ExchangeTradingAlgorithmLive,
+    ExchangeTradingAlgorithmBacktest,
+)
+from catalyst.exchange.exchange_data_portal import DataPortalExchangeLive, \
+    DataPortalExchangeBacktest
+from catalyst.exchange.exchange_asset_finder import ExchangeAssetFinder
 
-log = Logger('run_algo')
+from catalyst.constants import LOG_LEVEL, ALPHA_WARNING_MESSAGE, \
+    DISABLE_ALPHA_WARNING
+
+log = Logger('run_algo', level=LOG_LEVEL)
 
 
 class _RunAlgoError(click.ClickException, ValueError):
@@ -61,6 +58,7 @@ class _RunAlgoError(click.ClickException, ValueError):
     ----------
     pyfunc_msg : str
         The message that will be shown when called as a python function.
+
     cmdline_msg : str
         The message that will be shown on the command line.
     """
@@ -95,12 +93,17 @@ def _run(handle_data,
          live,
          exchange,
          algo_namespace,
-         base_currency,
-         live_graph):
+         quote_currency,
+         live_graph,
+         analyze_live,
+         simulate_orders,
+         auth_aliases,
+         stats_output):
     """Run a backtest for the given algorithm.
 
     This is shared between the cli and :func:`catalyst.run_algo`.
     """
+    # TODO: refactor for more granularity
     if algotext is not None:
         if local_namespace:
             ip = get_ipython()  # noqa
@@ -145,205 +148,201 @@ def _run(handle_data,
         else:
             click.echo(algotext)
 
-    mode = 'live' if live else 'backtest'
+    log.info('Catalyst version {}'.format(catalyst.__version__))
+    if not DISABLE_ALPHA_WARNING:
+        log.warn(ALPHA_WARNING_MESSAGE)
+        sleep(3)
+
+    if live:
+        if simulate_orders:
+            mode = 'paper-trading'
+        else:
+            mode = 'live-trading'
+    else:
+        mode = 'backtest'
+
     log.info('running algo in {mode} mode'.format(mode=mode))
 
-    if live and exchange is not None:
-        exchange_name = exchange
-        start = pd.Timestamp.utcnow()
-        end = start + timedelta(minutes=1439)
+    exchange_name = exchange
+    if exchange_name is None:
+        raise ValueError('Please specify at least one exchange.')
 
-        portfolio = get_algo_object(
-            algo_name=algo_namespace,
-            key='portfolio_{}'.format(exchange_name),
-            environ=environ
-        )
-        if portfolio is None:
-            portfolio = ExchangePortfolio(
-                start_date=pd.Timestamp.utcnow()
+    if isinstance(auth_aliases, string_types):
+        aliases = auth_aliases.split(',')
+        if len(aliases) < 2 or len(aliases) % 2 != 0:
+            raise ValueError(
+                'the `auth_aliases` parameter must contain an even list '
+                'of comma-delimited values. For example, '
+                '"binance,auth2" or "binance,auth2,bittrex,auth2".'
             )
 
-        exchange_auth = get_exchange_auth(exchange_name)
-        if exchange_name == 'bitfinex':
-            exchange = Bitfinex(
-                key=exchange_auth['key'],
-                secret=exchange_auth['secret'],
-                base_currency=base_currency,
-                portfolio=portfolio
-            )
-        elif exchange_name == 'bittrex':
-            exchange = Bittrex(
-                key=exchange_auth['key'],
-                secret=exchange_auth['secret'],
-                base_currency=base_currency,
-                portfolio=portfolio
-            )
+        auth_aliases = dict(zip(aliases[::2], aliases[1::2]))
+
+    exchange_list = [x.strip().lower() for x in exchange.split(',')]
+    exchanges = dict()
+    for name in exchange_list:
+        if auth_aliases is not None and name in auth_aliases:
+            auth_alias = auth_aliases[name]
         else:
-            raise NotImplementedError(
-                'exchange not supported: %s' % exchange_name)
+            auth_alias = None
+
+        exchanges[name] = get_exchange(
+            exchange_name=name,
+            quote_currency=quote_currency,
+            must_authenticate=(live and not simulate_orders),
+            skip_init=True,
+            auth_alias=auth_alias,
+        )
 
     open_calendar = get_calendar('OPEN')
-    sim_params = create_simulation_parameters(
-        start=start,
-        end=end,
-        capital_base=capital_base,
-        data_frequency=data_frequency,
-        emission_rate=data_frequency,
-    )
 
-    if live and exchange is not None:
-        env = TradingEnvironment(
+    env = TradingEnvironment(
+        load=partial(
+            load_crypto_market_data,
             environ=environ,
-            exchange_tz='UTC',
-            asset_db_path=None
-        )
-        env.asset_finder = AssetFinderExchange(exchange)
+            start_dt=start,
+            end_dt=end
+        ),
+        environ=environ,
+        exchange_tz='UTC',
+        asset_db_path=None  # We don't need an asset db, we have exchanges
+    )
+    env.asset_finder = ExchangeAssetFinder(exchanges=exchanges)
 
-        data = DataPortalExchange(
-            exchange=exchange,
+    def choose_loader(column):
+        bound_cols = TradingPairPricing.columns
+        if column in bound_cols:
+            return ExchangePricingLoader(data_frequency)
+        raise ValueError(
+            "No PipelineLoader registered for column %s." % column
+        )
+
+    if live:
+        # TODO: fix the start data.
+        # is_start checks if a start date was specified by user
+        # needed for live clock
+        is_start = True
+
+        if start is None:
+            start = pd.Timestamp.utcnow()
+            is_start = False
+        elif start:
+            assert pd.Timestamp.utcnow() <= start, \
+                "specified start date is in the past."
+        elif start and end:
+            assert start < end, "start date is later than end date."
+
+        # TODO: fix the end data.
+        # is_end checks if an end date was specified by user
+        # needed for live clock
+        is_end = True
+
+        if end is None:
+            end = start + timedelta(hours=8760)
+            is_end = False
+
+        data = DataPortalExchangeLive(
+            exchanges=exchanges,
             asset_finder=env.asset_finder,
             trading_calendar=open_calendar,
             first_trading_day=pd.to_datetime('today', utc=True)
         )
-        choose_loader = None
-
-        def fetch_capital_base(attempt_index=0):
-            """
-            Fetch the base currency amount required to bootstrap
-            the algorithm against the exchange.
-
-            The algorithm cannot continue without this value.
-
-            :param attempt_index:
-            :return capital_base: the amount of base currency available for
-            trading
-            """
-            try:
-                log.debug('retrieving capital base in {} to bootstrap '
-                          'exchange {}'.format(base_currency, exchange_name))
-                balances = exchange.get_balances()
-            except ExchangeRequestError as e:
-                if attempt_index < 20:
-                    sleep(5)
-                    return fetch_capital_base(attempt_index + 1)
-                else:
-                    raise ExchangeRequestErrorTooManyAttempts(
-                        attempts=attempt_index,
-                        error=e
-                    )
-
-            if base_currency in balances:
-                return balances[base_currency]
-            else:
-                raise BaseCurrencyNotFoundError(
-                    base_currency=base_currency,
-                    exchange=exchange_name
-                )
 
         sim_params = create_simulation_parameters(
             start=start,
             end=end,
-            capital_base=fetch_capital_base(),
+            capital_base=capital_base,
             emission_rate='minute',
             data_frequency='minute'
         )
 
+        # TODO: use the constructor instead
+        sim_params._arena = 'live'
+
+        algorithm_class = partial(
+            ExchangeTradingAlgorithmLive,
+            exchanges=exchanges,
+            algo_namespace=algo_namespace,
+            live_graph=live_graph,
+            simulate_orders=simulate_orders,
+            stats_output=stats_output,
+            analyze_live=analyze_live,
+            start=start,
+            is_start=is_start,
+            end=end,
+            is_end=is_end,
+        )
+    elif exchanges:
+        # Removed the existing Poloniex fork to keep things simple
+        # We can add back the complexity if required.
+
+        # I don't think that we should have arbitrary price data bundles
+        # Instead, we should center this data around exchanges.
+        # We still need to support bundles for other misc data, but we
+        # can handle this later.
+
+        if (start and start != pd.tslib.normalize_date(start)) or \
+                (end and end != pd.tslib.normalize_date(end)):
+            # todo: add to Sim_Params the option to
+            # start & end at specific times
+            log.warn(
+                "Catalyst currently starts and ends on the start and "
+                "end of the dates specified, respectively. We hope to "
+                "Modify this and support specific times in a future release."
+            )
+
+        data = DataPortalExchangeBacktest(
+            exchange_names=[ex_name for ex_name in exchanges],
+            asset_finder=None,
+            trading_calendar=open_calendar,
+            first_trading_day=start,
+            last_available_session=end
+        )
+
+        sim_params = create_simulation_parameters(
+            start=start,
+            end=end,
+            capital_base=capital_base,
+            data_frequency=data_frequency,
+            emission_rate=data_frequency,
+        )
+
+        algorithm_class = partial(
+            ExchangeTradingAlgorithmBacktest,
+            exchanges=exchanges
+        )
+
     elif bundle is not None:
-        bundles = bundle.split(',')
+        bundle_data = load(
+            bundle,
+            environ,
+            bundle_timestamp,
+        )
 
-        def get_trading_env_and_data(bundles):
-            env = data = None
-
-            b = 'poloniex'
-            if len(bundles) == 0:
-                return env, data
-            elif len(bundles) == 1:
-                b = bundles[0]
-
-            bundle_data = load(
-                b,
-                environ,
-                bundle_timestamp,
-            )
-
-            prefix, connstr = re.split(
-                r'sqlite:///',
+        prefix, connstr = re.split(
+            r'sqlite:///',
+            str(bundle_data.asset_finder.engine.url),
+            maxsplit=1,
+        )
+        if prefix:
+            raise ValueError(
+                "invalid url %r, must begin with 'sqlite:///'" %
                 str(bundle_data.asset_finder.engine.url),
-                maxsplit=1,
-            )
-            if prefix:
-                raise ValueError(
-                    "invalid url %r, must begin with 'sqlite:///'" %
-                    str(bundle_data.asset_finder.engine.url),
-                )
-
-            env = TradingEnvironment(
-                load=partial(load_crypto_market_data, bundle=b,
-                             bundle_data=bundle_data, environ=environ),
-                bm_symbol='USDT_BTC',
-                trading_calendar=open_calendar,
-                asset_db_path=connstr,
-                environ=environ,
             )
 
-            first_trading_day = bundle_data.minute_bar_reader.first_trading_day
+        env = TradingEnvironment(asset_db_path=connstr, environ=environ)
+        first_trading_day = \
+            bundle_data.equity_minute_bar_reader.first_trading_day
 
-            data = DataPortal(
-                env.asset_finder,
-                open_calendar,
-                first_trading_day=first_trading_day,
-                minute_reader=bundle_data.minute_bar_reader,
-                five_minute_reader=bundle_data.five_minute_bar_reader,
-                daily_reader=bundle_data.daily_bar_reader,
-                adjustment_reader=bundle_data.adjustment_reader,
-            )
+        data = DataPortal(
+            env.asset_finder, open_calendar,
+            first_trading_day=first_trading_day,
+            equity_minute_reader=bundle_data.equity_minute_bar_reader,
+            equity_daily_reader=bundle_data.equity_daily_bar_reader,
+            adjustment_reader=bundle_data.adjustment_reader,
+        )
 
-            return env, data
-
-        def get_loader_for_bundle(b):
-            bundle_data = load(
-                b,
-                environ,
-                bundle_timestamp,
-            )
-
-            if b == 'poloniex':
-                return CryptoPricingLoader(
-                    bundle_data,
-                    data_frequency,
-                    CryptoPricing,
-                )
-            elif b == 'quandl':
-                return USEquityPricingLoader(
-                    bundle_data,
-                    data_frequency,
-                    USEquityPricing,
-                )
-            raise ValueError(
-                "No PipelineLoader registered for bundle %s." % b
-            )
-
-        loaders = [get_loader_for_bundle(b) for b in bundles]
-        env, data = get_trading_env_and_data(bundles)
-
-        def choose_loader(column):
-            for loader in loaders:
-                if column in loader.columns:
-                    return loader
-            raise ValueError(
-                "No PipelineLoader registered for column %s." % column
-            )
-
-    else:
-        env = TradingEnvironment(environ=environ)
-        choose_loader = None
-
-    TradingAlgorithmClass = (
-        partial(ExchangeTradingAlgorithm, exchange=exchange,
-                algo_namespace=algo_namespace, live_graph=live_graph)
-        if live and exchange else TradingAlgorithm)
-
-    perf = TradingAlgorithmClass(
+    perf = algorithm_class(
         namespace=namespace,
         env=env,
         get_pipeline_loader=choose_loader,
@@ -439,24 +438,32 @@ def run_algorithm(initialize,
                   strict_extensions=True,
                   environ=os.environ,
                   live=False,
+                  remote=False,
+                  mail=None,
                   exchange_name=None,
-                  base_currency=None,
+                  quote_currency=None,
                   algo_namespace=None,
-                  live_graph=False):
-    """Run a trading algorithm.
+                  live_graph=False,
+                  analyze_live=None,
+                  simulate_orders=True,
+                  auth_aliases=None,
+                  stats_output=None,
+                  output=os.devnull):
+    """
+    Run a trading algorithm.
 
     Parameters
     ----------
+    capital_base : float
+        The starting capital for the backtest.
     start : datetime
         The start date of the backtest.
     end : datetime
         The end date of the backtest..
     initialize : callable[context -> None]
         The initialize function to use for the algorithm. This is called once
-        at the very begining of the backtest and should be used to set up
+        at the very beginning of the run and should be used to set up
         any state needed by the algorithm.
-    capital_base : float
-        The starting capital for the backtest.
     handle_data : callable[(context, BarData) -> None], optional
         The handle_data function to use for the algorithm. This is called
         every minute when ``data_frequency == 'minute'`` or every day
@@ -466,10 +473,12 @@ def run_algorithm(initialize,
         once before each trading day (after initialize on the first day).
     analyze : callable[(context, pd.DataFrame) -> None], optional
         The analyze function to use for the algorithm. This function is called
-        once at the end of the backtest and is passed the context and the
-        performance data.
+        once at the end of the backtest/live run and is passed the
+        context and the performance data.
     data_frequency : {'daily', 'minute'}, optional
         The data frequency to run the algorithm at.
+        At backtest both modes are supported, at live mode only
+        the minute mode is supported.
     data : pd.DataFrame, pd.Panel, or DataPortal, optional
         The ohlcv data to run the backtest with.
         This argument is mutually exclusive with:
@@ -477,7 +486,7 @@ def run_algorithm(initialize,
         ``bundle_timestamp``
     bundle : str, optional
         The name of the data bundle to use to load the data to run the backtest
-        with. This defaults to 'quantopian-quandl'.
+        with.
         This argument is mutually exclusive with ``data``.
     bundle_timestamp : datetime, optional
         The datetime to lookup the bundle data for. This defaults to the
@@ -485,7 +494,7 @@ def run_algorithm(initialize,
         This argument is mutually exclusive with ``data``.
     default_extension : bool, optional
         Should the default catalyst extension be loaded. This is found at
-        ``$ZIPLINE_ROOT/extension.py``
+        ``$CATALYST_ROOT/extension.py``
     extensions : iterable[str], optional
         The names of any other extensions to load. Each element may either be
         a dotted module path like ``a.b.c`` or a path to a python file ending
@@ -496,24 +505,59 @@ def run_algorithm(initialize,
     environ : mapping[str -> str], optional
         The os environment to use. Many extensions use this to get parameters.
         This defaults to ``os.environ``.
-    live: execute live trading
-    exchange_conn: The exchange connection parameters
+    live : bool, optional
+        Should the algorithm be executed in live trading mode.
+    remote : bool, optional
+        Should the algorithm run on a remote server.
+        currently, available only on backtest mode.
+    mail : str, optional- if running with remote=True then, mandatory.
+        to which email address shall the server send the results to.
 
-    Supported Exchanges
-    -------------------
-    bitfinex
+    exchange_name: str
+        The name of the exchange to be used in the backtest/live run.
+    quote_currency: str
+        The base currency to be used in the backtest/live run.
+    algo_namespace: str
+        The namespace of the algorithm.
+    live_graph: bool, optional
+        Should the live graph clock be used instead of the regular clock.
+    analyze_live: callable[(context, pd.DataFrame) -> None], optional
+        The interactive analyze function to be used with
+        the live graph clock in every tick.
+    simulate_orders: bool, optional
+        Should paper trading mode be applied.
+    auth_aliases: str, optional
+        Rewrite the auth file name. It should contain an even list
+        of comma-delimited values. For example: "binance,auth2,bittrex,auth2"
+    stats_output: str, optional
+        The URI of the S3 bucket to which to upload the performance stats.
+    output: str, optional
+        The output file path to which the algorithm performance
+        is serialized.
 
     Returns
     -------
     perf : pd.DataFrame
         The daily performance of the algorithm.
-
-    See Also
-    --------
-    catalyst.data.bundles.bundles : The available data bundles.
     """
-    load_extensions(default_extension, extensions, strict_extensions, environ)
 
+    load_extensions(
+        default_extension, extensions, strict_extensions, environ
+    )
+
+    if capital_base is None:
+        raise ValueError(
+            'Please specify a `capital_base` parameter which is the maximum '
+            'amount of base currency available for trading. For example, '
+            'if the `capital_base` is 5ETH, the '
+            '`order_target_percent(asset, 1)` command will order 5ETH worth '
+            'of the specified asset.'
+        )
+    # I'm not sure that we need this since the modified DataPortal
+    # does not require extensions to be explicitly loaded.
+
+    # This will be useful for arbitrary non-pricing bundles but we may
+    # need to modify the logic.
     if not live:
         non_none_data = valfilter(bool, {
             'data': data is not None,
@@ -533,6 +577,42 @@ def run_algorithm(initialize,
             raise ValueError(
                 'cannot specify `bundle_timestamp` without passing `bundle`',
             )
+    if remote:
+        if mail is None or not re.match(r"[^@]+@[^@]+\.[^@]+", mail):
+            raise ValueError("Please specify a 'mail' parameter which "
+                             "is a valid email address, in order to "
+                             "send you back the results")
+        return remote_backtest(
+            handle_data=handle_data,
+            initialize=initialize,
+            before_trading_start=before_trading_start,
+            analyze=None,
+            algofile=None,
+            algotext=None,
+            defines=(),
+            data_frequency=data_frequency,
+            capital_base=capital_base,
+            data=data,
+            bundle=bundle,
+            bundle_timestamp=bundle_timestamp,
+            start=start,
+            end=end,
+            output='--',
+            print_algo=False,
+            local_namespace=False,
+            environ=environ,
+            live=False,
+            exchange=exchange_name,
+            algo_namespace=algo_namespace,
+            quote_currency=quote_currency,
+            live_graph=live_graph,
+            analyze_live=analyze_live,
+            simulate_orders=simulate_orders,
+            auth_aliases=auth_aliases,
+            stats_output=stats_output,
+            mail=mail
+        )
+
     return _run(
         handle_data=handle_data,
         initialize=initialize,
@@ -548,13 +628,17 @@ def run_algorithm(initialize,
         bundle_timestamp=bundle_timestamp,
         start=start,
         end=end,
-        output=os.devnull,
+        output=output,
         print_algo=False,
         local_namespace=False,
         environ=environ,
         live=live,
         exchange=exchange_name,
         algo_namespace=algo_namespace,
-        base_currency=base_currency,
-        live_graph=live_graph
+        quote_currency=quote_currency,
+        live_graph=live_graph,
+        analyze_live=analyze_live,
+        simulate_orders=simulate_orders,
+        auth_aliases=auth_aliases,
+        stats_output=stats_output
     )

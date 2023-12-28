@@ -59,7 +59,7 @@ class TradingCalendarDispatcher(object):
 
     def get_calendar(self, name):
         """
-        Retrieves an instance of an TradingCalendar whose name is given.
+        Retrieves an instance of a TradingCalendar whose name is given.
 
         Parameters
         ----------
@@ -94,9 +94,9 @@ class TradingCalendarDispatcher(object):
         Do we have (or have the ability to make) a calendar with ``name``?
         """
         return (
-            name in self._calendars
-            or name in self._calendar_factories
-            or name in self._aliases
+            name in self._calendars or
+            name in self._calendar_factories or
+            name in self._aliases
         )
 
     def register_calendar(self, name, calendar, force=False):

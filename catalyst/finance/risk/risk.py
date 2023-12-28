@@ -61,7 +61,9 @@ Risk Report
 import logbook
 import numpy as np
 
-log = logbook.Logger('Risk')
+from catalyst.constants import LOG_LEVEL
+
+log = logbook.Logger('Risk', level=LOG_LEVEL)
 
 
 TREASURY_DURATIONS = [
@@ -158,7 +160,8 @@ def choose_treasury(select_treasury, treasury_curves, start_session,
                 )
                 break
 
-        if search_day and trading_calendar.name != 'OPEN':          # Supress warning for 'OPEN' calendar
+        # Supress warning for 'OPEN' calendar
+        if search_day and trading_calendar.name != 'OPEN':
             if (search_dist is None or search_dist > 1) and \
                     search_days[0] <= end_session <= search_days[-1]:
                 message = "No rate within 1 trading day of end date = \

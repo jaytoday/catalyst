@@ -76,6 +76,7 @@ from catalyst.finance.execution import (
     StopLimitOrder,
     StopOrder,
 )
+from catalyst.finance.order import Order
 from catalyst.finance.performance import PerformanceTracker
 from catalyst.finance.asset_restrictions import Restrictions
 from catalyst.finance.cancel_policy import NeverCancel, CancelPolicy
@@ -124,7 +125,6 @@ from catalyst.utils.events import (
 from catalyst.utils.factory import create_simulation_parameters
 from catalyst.utils.math_utils import (
     tolerant_equals,
-    round_if_near_integer,
     round_nearest
 )
 from catalyst.utils.pandas_utils import clear_dataframe_indexer_caches
@@ -134,15 +134,13 @@ from catalyst.utils.security_list import SecurityList
 import catalyst.protocol
 from catalyst.sources.requests_csv import PandasRequestsCSV
 
-from catalyst.gens.sim_engine import (
-    MinuteSimulationClock,
-    FiveMinuteSimulationClock,
-)
+from catalyst.gens.sim_engine import MinuteSimulationClock
 from catalyst.sources.benchmark_source import BenchmarkSource
 from catalyst.catalyst_warnings import ZiplineDeprecationWarning
 
+from catalyst.constants import LOG_LEVEL
 
-log = logbook.Logger("ZiplineLog")
+log = logbook.Logger("CatalystLog", level=LOG_LEVEL)
 
 
 class TradingAlgorithm(object):
@@ -174,7 +172,7 @@ class TradingAlgorithm(object):
     algo_filename : str, optional
         The filename for the algoscript. This will be used in exception
         tracebacks. default: '<string>'.
-    data_frequency : {'daily', '5-minute', 'minute'}, optional
+    data_frequency : {'daily', 'minute'}, optional
         The duration of the bars.
     instant_fill : bool, optional
         Whether to fill orders immediately or on next bar. default: False
@@ -227,7 +225,7 @@ class TradingAlgorithm(object):
             script : str
                 Algoscript that contains initialize and
                 handle_data function definition.
-            data_frequency : {'daily', '5-minute', 'minute'}
+            data_frequency : {'daily', 'minute'}
                The duration of the bars.
             capital_base : float <default: 1.0e5>
                How much capital to start with.
@@ -435,8 +433,6 @@ class TradingAlgorithm(object):
         if get_loader is not None:
             if data_frequency == 'daily':
                 all_dates = self.trading_calendar.all_sessions
-            elif data_frequency == '5-minute':
-                all_dates = self.trading_calendar.all_five_minutes
             elif data_frequency == 'minute':
                 all_dates = self.trading_calendar.all_minutes
             else:
@@ -468,7 +464,7 @@ class TradingAlgorithm(object):
         self._in_before_trading_start = True
 
         with handle_non_market_minutes(data) if \
-                self.data_frequency in ('minute', '5-minute') else ExitStack():
+                self.data_frequency == 'minute' else ExitStack():
             self._before_trading_start(self, data)
 
         self._in_before_trading_start = False
@@ -524,11 +520,10 @@ class TradingAlgorithm(object):
         market_closes = trading_o_and_c['market_close']
         minutely_emission = False
 
-        if self.sim_params.data_frequency in set(('minute', '5-minute')):
+        if self.sim_params.data_frequency == 'minute':
             market_opens = trading_o_and_c['market_open']
 
-            minutely_emission = self.sim_params.emission_rate in \
-                set(('minute', '5-minute'))
+            minutely_emission = self.sim_params.emission_rate == 'minute'
         else:
             # in daily mode, we want to have one bar per session, timestamped
             # as the last minute of the session.
@@ -551,15 +546,6 @@ class TradingAlgorithm(object):
             time(0, 0),
             'UTC',
         )
-
-        if self.sim_params.data_frequency == '5-minute':
-            return FiveMinuteSimulationClock(
-                self.sim_params.sessions,
-                execution_opens,
-                execution_closes,
-                before_trading_start_minutes,
-                minute_emission=minutely_emission,
-            )
 
         return MinuteSimulationClock(
             self.sim_params.sessions,
@@ -692,8 +678,6 @@ class TradingAlgorithm(object):
                     time_count = times.nunique()
                     if time_count == 1:
                         self.sim_params.data_frequency = 'daily'
-                    elif time_count == 288:
-                        self.sim_params.data_frequency = '5-minute'
                     else:
                         self.sim_params.data_frequency = 'minute'
 
@@ -715,8 +699,6 @@ class TradingAlgorithm(object):
 
                 if self.sim_params.data_frequency == 'daily':
                     equity_reader_arg = 'equity_daily_reader'
-                elif self.sim_params.data_frequency == '5-minute':
-                    equity_daily_reader = 'equity_5_minute_reader'
                 elif self.sim_params.data_frequency == 'minute':
                     equity_reader_arg = 'equity_minute_reader'
                 equity_reader = PanelBarReader(
@@ -956,13 +938,11 @@ class TradingAlgorithm(object):
         field : {'platform', 'arena', 'data_frequency',
                  'start', 'end', 'capital_base', 'platform', '*'}
             The field to query. The options have the following meanings:
-              arena : str
-                  The arena from the simulation parameters. This will normally
-                  be ``'backtest'`` but some systems may use this distinguish
-                  live trading from backtesting.
-              data_frequency : {'daily', '5-minute', 'minute'}
+              arena : str {'backtest', 'live'}
+                  The algorithm's arena.
+              data_frequency : {'daily', 'minute'}
                   data_frequency tells the algorithm if it is running with
-                  daily, minute, or five-minute mode.
+                  daily or minute mode.
               start : datetime
                   The start date for the simulation.
               end : datetime
@@ -973,7 +953,7 @@ class TradingAlgorithm(object):
                   The platform that the code is running on. By default this
                   will be the string 'catalyst'. This can allow algorithms to
                   know if they are running on the Quantopian platform instead.
-              * : dict[str -> any]
+              \* : dict[str -> any]
                   Returns all of the fields in a dictionary.
 
         Returns
@@ -1051,7 +1031,7 @@ class TradingAlgorithm(object):
             argument is the name of the column in the preprocessed dataframe
             containing the symbols. This will be used along with the date
             information to map the sids in the asset finder.
-        **kwargs
+        \*\*kwargs
             Forwarded to :func:`pandas.read_csv`.
 
         Returns
@@ -1136,19 +1116,12 @@ class TradingAlgorithm(object):
                           'date_rule. You should use keyword argument '
                           'time_rule= when calling schedule_function without '
                           'specifying a date_rule', stacklevel=3)
-        
-        freq = self.sim_params.data_frequency
 
         date_rule = date_rule or date_rules.every_day()
-        if freq is 'daily':
-            # ignore time rule in daily mode
-            time_rule = time_rules.every_minute()
-        else:
-            # use provided time rule or default to every minute or 5 minutes
-            # based on desired data frequency.
-            time_rule = time_rule or (time_rules.every_5_minutes()
-                                      if freq is '5-minute' else
-                                      time_rules.every_minute())
+        time_rule = ((time_rule or time_rules.every_minute())
+                     if self.sim_params.data_frequency == 'minute' else
+                     # If we are in daily mode the time_rule is ignored.
+                     time_rules.every_minute())
 
         # Check the type of the algorithm's schedule before pulling calendar
         # Note that the ExchangeTradingSchedule is currently the only
@@ -1182,7 +1155,7 @@ class TradingAlgorithm(object):
 
         Parameters
         ----------
-        **kwargs
+        \*\*kwargs
             The names and values to record.
 
         Notes
@@ -1295,17 +1268,18 @@ class TradingAlgorithm(object):
 
     @api_method
     def symbols(self, *args):
-        """Lookup multuple Equities as a list.
+        """Lookup multiple TradingPairs as a list.
+        for example: symbols('eth_usd','btc_usd')
 
         Parameters
         ----------
-        *args : iterable[str]
+        \*args : iterable[str]
             The ticker symbols to lookup.
 
         Returns
         -------
-        equities : list[Equity]
-            The equities that held the given ticker symbols on the current
+        tradingPairs : list[TradingPair]
+            The tradingPairs that held the given ticker symbols on the current
             symbol lookup date.
 
         Raises
@@ -1322,22 +1296,25 @@ class TradingAlgorithm(object):
 
     @api_method
     def sid(self, sid):
-        """Lookup an Asset by its unique asset identifier.
+        """Lookup a Trading Pair by its unique identifier.
 
         Parameters
         ----------
         sid : int
-            The unique integer that identifies an asset.
+            The unique integer that identifies an Trading Pair.
+            for example: The unique sid for the 'btc_usdt' Trading Pair on
+            poloniex is 374465. Therefore, running sid(374465)
+            will give you the symbol of the Trading Pair
 
         Returns
         -------
-        asset : Asset
-            The asset with the given ``sid``.
+        TradingPair : TradingPair
+            The TradingPair with the given ``sid``.
 
         Raises
         ------
         SidsNotFound
-            When a requested ``sid`` does not map to any asset.
+            When a requested ``sid`` does not map to any TradingPair.
         """
         return self.asset_finder.retrieve_asset(sid)
 
@@ -1446,15 +1423,16 @@ class TradingAlgorithm(object):
         Parameters
         ----------
         asset : Asset
-            The asset that this order is for.
+            The asset/TradingPair that this order is for.
         amount : int
-            The amount of shares to order. If ``amount`` is positive, this is
-            the number of shares to buy or cover. If ``amount`` is negative,
-            this is the number of shares to sell or short.
+            The amount of currency to order. If ``amount`` is positive, this is
+            the number of ``base_currency`` (the first asset in the pair) to
+            buy. If ``amount`` is negative, this is the number of
+            ``base_currency`` to sell (buy ``quote_currency``).
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported.
         style : ExecutionStyle, optional
             The execution style for the order.
 
@@ -1466,13 +1444,13 @@ class TradingAlgorithm(object):
 
         Notes
         -----
-        The ``limit_price`` and ``stop_price`` arguments provide shorthands for
+        The ``limit_price`` argument provide shorthands for
         passing common execution styles. Passing ``limit_price=N`` is
-        equivalent to ``style=LimitOrder(N)``. Similarly, passing
-        ``stop_price=M`` is equivalent to ``style=StopOrder(M)``, and passing
-        ``limit_price=N`` and ``stop_price=M`` is equivalent to
-        ``style=StopLimitOrder(N, M)``. It is an error to pass both a ``style``
-        and ``limit_price`` or ``stop_price``.
+        equivalent to ``style=LimitOrder(N)``. It is an error to pass both
+        a ``style`` and ``limit_price``.
+
+        Currently, orders must be done only with one ``quote_currency``
+        throughout all the algorithm.
 
         See Also
         --------
@@ -1510,7 +1488,6 @@ class TradingAlgorithm(object):
         """
         Converts the number of shares to the smallest tradable lot size for
         the asset being ordered.
-        
         """
         return round_nearest(amount, asset.min_trade_size)
 
@@ -1548,6 +1525,7 @@ class TradingAlgorithm(object):
                              self.updated_portfolio(),
                              self.get_datetime(),
                              self.trading_client.current_data)
+
     @staticmethod
     def __convert_order_params_for_blotter(limit_price, stop_price, style):
         """
@@ -1577,25 +1555,23 @@ class TradingAlgorithm(object):
                     limit_price=None,
                     stop_price=None,
                     style=None):
-        """Place an order by desired value rather than desired number of
-        shares.
+        """Place an order by ``quote_currency`` value rather than desired number of
+        ``base_currency`` wanted.
 
         Parameters
         ----------
-        asset : Asset
-            The asset that this order is for.
+        asset : TradingPair
+            The TradingPair that this order is for.
         value : float
-            If the requested asset exists, the requested value is
-            divided by its price to imply the number of shares to transact.
-            If the Asset being ordered is a Future, the 'value' calculated
-            is actually the exposure, as Futures have no 'value'.
+            If the requested tradingPair exists, the requested value is
+            divided by its price to imply the number of currency to transact.
 
             value > 0 :: Buy/Cover
-            value < 0 :: Sell/Short
+            value < 0 :: Sell
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported.
         style : ExecutionStyle
             The execution style for the order.
 
@@ -1607,7 +1583,7 @@ class TradingAlgorithm(object):
         Notes
         -----
         See :func:`catalyst.api.order` for more information about
-        ``limit_price``, ``stop_price``, and ``style``
+        ``limit_price``, and ``style``
 
         See Also
         --------
@@ -1798,8 +1774,6 @@ class TradingAlgorithm(object):
     @api_method
     def set_symbol_lookup_date(self, dt):
         """Set the date for which symbols will be resolved to their assets
-        (symbols may map to different firms or underlying assets at
-        different times)
 
         Parameters
         ----------
@@ -1819,7 +1793,7 @@ class TradingAlgorithm(object):
 
     @data_frequency.setter
     def data_frequency(self, value):
-        assert value in ('daily', '5-minute', 'minute')
+        assert value in ('daily', 'minute')
         self.sim_params.data_frequency = value
 
     @api_method
@@ -1830,20 +1804,20 @@ class TradingAlgorithm(object):
                       limit_price=None,
                       stop_price=None,
                       style=None):
-        """Place an order in the specified asset corresponding to the given
+        """Place an order in the specified tradingPair corresponding to the given
         percent of the current portfolio value.
 
         Parameters
         ----------
-        asset : Asset
-            The asset that this order is for.
+        asset : TradingPair
+            The tradingPair that this order is for.
         percent : float
-            The percentage of the porfolio value to allocate to ``asset``.
+            The percentage of the portfolio value to allocate to ``asset``.
             This is specified as a decimal, for example: 0.50 means 50%.
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported.
         style : ExecutionStyle
             The execution style for the order.
 
@@ -1855,7 +1829,7 @@ class TradingAlgorithm(object):
         Notes
         -----
         See :func:`catalyst.api.order` for more information about
-        ``limit_price``, ``stop_price``, and ``style``
+        ``limit_price``, and ``style``
 
         See Also
         --------
@@ -1884,7 +1858,7 @@ class TradingAlgorithm(object):
                      limit_price=None,
                      stop_price=None,
                      style=None):
-        """Place an order to adjust a position to a target number of shares. If
+        """Place an order to adjust a position to a target number of currency. If
         the position doesn't already exist, this is equivalent to placing a new
         order. If the position does exist, this is equivalent to placing an
         order for the difference between the target number of shares and the
@@ -1892,14 +1866,14 @@ class TradingAlgorithm(object):
 
         Parameters
         ----------
-        asset : Asset
-            The asset that this order is for.
+        asset : TradingPair
+            The TradingPair that this order is for.
         target : int
-            The desired number of shares of ``asset``.
+            The desired number of ``TradingPair``.
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported.
         style : ExecutionStyle
             The execution style for the order.
 
@@ -1911,20 +1885,10 @@ class TradingAlgorithm(object):
 
         Notes
         -----
-        ``order_target`` does not take into account any open orders. For
-        example:
-
-        .. code-block:: python
-
-           order_target(sid(0), 10)
-           order_target(sid(0), 10)
-
-        This code will result in 20 shares of ``sid(0)`` because the first
-        call to ``order_target`` will not have been filled when the second
-        ``order_target`` call is made.
+        ``order_target`` takes into account open orders as well.
 
         See :func:`catalyst.api.order` for more information about
-        ``limit_price``, ``stop_price``, and ``style``
+        ``limit_price``, and ``style``
 
         See Also
         --------
@@ -1962,19 +1926,17 @@ class TradingAlgorithm(object):
         order. If the position does exist, this is equivalent to placing an
         order for the difference between the target value and the
         current value.
-        If the Asset being ordered is a Future, the 'target value' calculated
-        is actually the target exposure, as Futures have no 'value'.
 
         Parameters
         ----------
-        asset : Asset
-            The asset that this order is for.
+        asset : TradingPair
+            The TradingPair that this order is for.
         target : float
-            The desired total value of ``asset``.
+            The desired total value of ``TradingPair``.
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported.
         style : ExecutionStyle
             The execution style for the order.
 
@@ -1985,20 +1947,9 @@ class TradingAlgorithm(object):
 
         Notes
         -----
-        ``order_target_value`` does not take into account any open orders. For
-        example:
-
-        .. code-block:: python
-
-           order_target_value(sid(0), 10)
-           order_target_value(sid(0), 10)
-
-        This code will result in 20 dollars of ``sid(0)`` because the first
-        call to ``order_target_value`` will not have been filled when the
-        second ``order_target_value`` call is made.
 
         See :func:`catalyst.api.order` for more information about
-        ``limit_price``, ``stop_price``, and ``style``
+        ``limit_price`` and ``style``
 
         See Also
         --------
@@ -2029,16 +1980,16 @@ class TradingAlgorithm(object):
 
         Parameters
         ----------
-        asset : Asset
-            The asset that this order is for.
+        asset : TradingPair
+            The TradingPair that this order is for.
         target : float
-            The desired percentage of the porfolio value to allocate to
-            ``asset``. This is specified as a decimal, for example:
+            The desired percentage of the portfolio value to allocate to
+            ``TradingPair``. This is specified as a decimal, for example:
             0.50 means 50%.
         limit_price : float, optional
             The limit price for the order.
         stop_price : float, optional
-            The stop price for the order.
+            Not supported
         style : ExecutionStyle
             The execution style for the order.
 
@@ -2049,20 +2000,9 @@ class TradingAlgorithm(object):
 
         Notes
         -----
-        ``order_target_value`` does not take into account any open orders. For
-        example:
-
-        .. code-block:: python
-
-           order_target_percent(sid(0), 10)
-           order_target_percent(sid(0), 10)
-
-        This code will result in 20% of the portfolio being allocated to sid(0)
-        because the first call to ``order_target_percent`` will not have been
-        filled when the second ``order_target_percent`` call is made.
 
         See :func:`catalyst.api.order` for more information about
-        ``limit_price``, ``stop_price``, and ``style``
+        ``limit_price`` and ``style``
 
         See Also
         --------
@@ -2093,7 +2033,7 @@ class TradingAlgorithm(object):
         Parameters
         ----------
         share_counts : pd.Series[Asset -> int]
-            Map from asset to number of shares to order for that asset.
+            Map from TradingPair to the number to order for that TradingPair.
 
         Returns
         -------
@@ -2116,7 +2056,7 @@ class TradingAlgorithm(object):
 
         Parameters
         ----------
-        asset : Asset
+        asset : Asset, optional
             If passed and not None, return only the open orders for the given
             asset instead of all open orders.
 
@@ -2167,7 +2107,8 @@ class TradingAlgorithm(object):
             The order_id or order object to cancel.
         """
         order_id = order_param
-        if isinstance(order_param, catalyst.protocol.Order):
+        if isinstance(order_param, catalyst.protocol.Order) or \
+                isinstance(order_param, Order):
             order_id = order_param.id
 
         self.blotter.cancel(order_id)

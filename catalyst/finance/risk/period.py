@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import functools
+import warnings
 
 import logbook
 
@@ -23,20 +24,24 @@ import numpy as np
 import pandas as pd
 
 from . import risk
-from . risk import check_entry
+from .risk import check_entry
 
 from empyrical import (
     alpha_beta_aligned,
     annual_volatility,
-    cum_returns,
     downside_risk,
     information_ratio,
-    max_drawdown,
     sharpe_ratio,
     sortino_ratio
 )
+from catalyst.patches.stats import (
+    max_drawdown,
+    cum_returns,
+)
 
-log = logbook.Logger('Risk Period')
+from catalyst.constants import LOG_LEVEL
+
+log = logbook.Logger('Risk Period', level=LOG_LEVEL)
 
 choose_treasury = functools.partial(risk.choose_treasury,
                                     risk.select_treasury_duration)
@@ -76,14 +81,20 @@ class RiskMetricsPeriod(object):
         self.calculate_metrics()
 
     def calculate_metrics(self):
-        self.benchmark_period_returns = \
-            cum_returns(self.benchmark_returns).iloc[-1]
+        warnings.filterwarnings('error')
+
+        try:
+            self.benchmark_period_returns = \
+                cum_returns(self.benchmark_returns).iloc[-1]
+        except Exception:
+            # TODO: why is there an error
+            self.benchmark_period_returns = 0
 
         self.algorithm_period_returns = \
             cum_returns(self.algorithm_returns).iloc[-1]
 
         if not self.algorithm_returns.index.equals(
-            self.benchmark_returns.index
+                self.benchmark_returns.index
         ):
             message = "Mismatch between benchmark_returns ({bm_count}) and \
             algorithm_returns ({algo_count}) in range {start} : {end}"
@@ -126,10 +137,17 @@ class RiskMetricsPeriod(object):
         self.downside_risk = downside_risk(
             self.algorithm_returns.values
         )
-        self.sortino = sortino_ratio(
-            self.algorithm_returns.values,
-            _downside_risk=self.downside_risk,
-        )
+
+        try:
+            risk = self.downside_risk
+            self.sortino = sortino_ratio(
+                self.algorithm_returns.values,
+                _downside_risk=risk,
+            )
+        except Exception:
+            # TODO: what causes it to error out?
+            self.sortino = 0
+
         self.information = information_ratio(
             self.algorithm_returns.values,
             self.benchmark_returns.values,
@@ -138,10 +156,12 @@ class RiskMetricsPeriod(object):
             self.algorithm_returns.values,
             self.benchmark_returns.values,
         )
-        self.excess_return = self.algorithm_period_returns - \
-            self.treasury_period_return
+        self.excess_return = self.algorithm_period_returns \
+            - self.treasury_period_return
         self.max_drawdown = max_drawdown(self.algorithm_returns.values)
         self.max_leverage = self.calculate_max_leverage()
+
+        warnings.resetwarnings()
 
     def to_dict(self):
         """

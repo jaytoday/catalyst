@@ -70,7 +70,9 @@ import catalyst.finance.risk as risk
 
 from . position_tracker import PositionTracker
 
-log = logbook.Logger('Performance')
+from catalyst.constants import LOG_LEVEL
+
+log = logbook.Logger('Performance', level=LOG_LEVEL)
 
 
 class PerformanceTracker(object):
@@ -111,27 +113,11 @@ class PerformanceTracker(object):
                     self.treasury_curves,
                     self.trading_calendar
                 )
-        elif self.emission_rate == '5-minute':
-            self.all_benchmark_returns = pd.Series(
-                index=pd.date_range(
-                    self.sim_params.first_open,
-                    self.sim_params.last_close,
-                    freq='5min'
-                ),
-            )
-            self.cumulative_risk_metrics = \
-                risk.RiskMetricsCumulative(
-                    self.sim_params,
-                    self.treasury_curves,
-                    self.trading_calendar,
-                    create_first_day_stats=True,
-                )
         elif self.emission_rate == 'minute':
             self.all_benchmark_returns = pd.Series(index=pd.date_range(
                 self.sim_params.first_open, self.sim_params.last_close,
                 freq='Min')
             )
-
             self.cumulative_risk_metrics = \
                 risk.RiskMetricsCumulative(
                     self.sim_params,
@@ -458,14 +444,14 @@ class PerformanceTracker(object):
         When the simulation is complete, run the full period risk report
         and send it out on the results socket.
         """
-
-        log_msg = "Simulated {n} trading days out of {m}."
-        log.info(log_msg.format(n=int(self.session_count),
-                                m=self.total_session_count))
-        log.info("first open: {d}".format(
-            d=self.sim_params.first_open))
-        log.info("last close: {d}".format(
-            d=self.sim_params.last_close))
+        if self.sim_params.arena == 'backtest':
+            log_msg = "Simulated {n} trading days out of {m}."
+            log.info(log_msg.format(n=int(self.session_count),
+                                    m=self.total_session_count))
+            log.info("first open: {d}".format(
+                d=self.sim_params.first_open))
+            log.info("last close: {d}".format(
+                d=self.sim_params.last_close))
 
         bms = pd.Series(
             index=self.cumulative_risk_metrics.cont_index,

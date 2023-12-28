@@ -1,12 +1,25 @@
 .. include:: ../../README.rst
 
+|
+|
+
+Table of Contents
+-----------------
+
 .. toctree::
    :maxdepth: 1
 
    install
    beginner-tutorial
-   bundles
+   live-trading
+   intervals
+   example-algos
+   utilities
+   videos
+   resources
    development-guidelines
-   appendix
-   release-process
    releases
+   appendix
+..   bundles
+..   release-process
+

@@ -88,7 +88,10 @@ from six import itervalues, iteritems
 
 import catalyst.protocol as zp
 
-log = logbook.Logger('Performance')
+from catalyst.constants import LOG_LEVEL
+
+log = logbook.Logger('Performance', level=LOG_LEVEL)
+
 TRADE_TYPE = zp.DATASOURCE_TYPE.TRADE
 
 
@@ -386,6 +389,12 @@ class PerformancePeriod(object):
         """
         if isinstance(txn.asset, Future):
             return 0.0
+
+        # When running on live mode and the commission is reduced from the
+        # quote, means that the commission will be reduced from the cash
+        # (added to capital_used)
+        if txn.is_quote_live:
+            return -1 * txn.price * txn.amount - txn.commission
 
         return -1 * txn.price * txn.amount
 
